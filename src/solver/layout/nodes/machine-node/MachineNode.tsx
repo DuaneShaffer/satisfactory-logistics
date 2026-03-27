@@ -24,6 +24,7 @@ import {
 import { NodeProps, useReactFlow } from '@xyflow/react';
 import { memo } from 'react';
 import { useParams } from 'react-router-dom';
+import { DraggableDetail } from './DraggableDetail';
 
 import { PercentageFormatter } from '@/core/intl/PercentageFormatter';
 import type { FactoryItemId } from '@/recipes/FactoryItemId';
@@ -68,7 +69,7 @@ export const MachineNode = memo((props: IMachineNodeProps) => {
   const product = AllFactoryItemsMap[recipe.products[0].resource];
   const building = AllFactoryBuildingsMap[recipe.producedIn];
   const isAlt = recipe.name.includes('Alternate');
-  const { updateNode } = useReactFlow();
+  const { updateNode, flowToScreenPosition } = useReactFlow();
 
   const perBuilding = getRecipeProductPerBuilding(recipe, product.id);
 
@@ -82,7 +83,17 @@ export const MachineNode = memo((props: IMachineNodeProps) => {
   const overclock = nodeState?.overclock ?? 1;
   const buildingsAmount = originalValue / perBuilding / overclock;
   const amplifiedRate = (amplifiedValue + originalValue) / originalValue;
+
+  // Compute screen position of the node for initial panel placement
+  const screenPos = flowToScreenPosition({
+    x: props.positionAbsoluteX ?? 0,
+    y: props.positionAbsoluteY ?? 0,
+  });
+  const panelInitialX = screenPos.x;
+  const panelInitialY = screenPos.y + (props.height ?? 60) + 8;
+  
   return (
+    <>
     <Popover
       opened={(isHovering || props.selected) && !props.dragging}
       transitionProps={{}}
@@ -211,10 +222,13 @@ export const MachineNode = memo((props: IMachineNodeProps) => {
             </Box>
           </Group>
 
-          <InvisibleHandles />
+        <InvisibleHandles />
         </Box>
       </Popover.Target>
-      <Popover.Dropdown p={0}>
+    </Popover>
+
+    {props.selected && (
+      <DraggableDetail initialX={panelInitialX} initialY={panelInitialY}>
         <Flex
           align="stretch"
           gap={0}
@@ -229,20 +243,20 @@ export const MachineNode = memo((props: IMachineNodeProps) => {
               bg="dark.5"
               style={{
                 borderRadius: '4px 0 0 0',
+                cursor: 'grab',
               }}
             >
               <Group gap="sm" justify="space-between" align="flex-start">
                 <Title order={5} mb="xs">
                   {getRecipeDisplayName(recipe)}
                 </Title>
-                {props.selected && (
-                  <CloseButton
-                    size="sm"
-                    onClick={() => {
-                      updateNode(props.id, { selected: false });
-                    }}
-                  />
-                )}
+                <CloseButton
+                  size="sm"
+                  data-nodrag
+                  onClick={() => {
+                    updateNode(props.id, { selected: false });
+                  }}
+                />
               </Group>
               <Text component="div" size="sm">
                 <Group gap="xl">
@@ -336,23 +350,14 @@ export const MachineNode = memo((props: IMachineNodeProps) => {
             </Table>
           </Stack>
           <NodeActionsBox>
-            {props.selected ? (
-              <MachineNodeActions
-                data={props.data}
-                id={props.id}
-                buildingsAmount={buildingsAmount}
-              />
-            ) : (
-              <Stack>
-                <Text fs="italic" size="sm">
-                  Click on the node to see available actions, like ignoring this
-                  recipe or switching to an alternate recipe.
-                </Text>
-              </Stack>
-            )}
+            <MachineNodeActions
+              data={props.data}
+              id={props.id}
+              buildingsAmount={buildingsAmount}
+            />
           </NodeActionsBox>
         </Flex>
-      </Popover.Dropdown>
-    </Popover>
-  );
+      </DraggableDetail>
+    )}
+  </>);
 });

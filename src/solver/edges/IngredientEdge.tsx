@@ -31,6 +31,21 @@ export interface IIngredientEdgeData {
 
 const INVERSE_GAP = 10;
 
+const colorPalette = [
+  '#e03131', '#c2255c', '#9c36b5', '#6741d9', '#3b5bdb', '#1971c2', 
+  '#0c8599', '#099268', '#2f9e44', '#66a80f', '#f59f00', '#e8590c',
+  '#5c940d', '#748ffc', '#40c057', '#fa5252'
+];
+
+function getResourceColor(id?: string): string {
+  if (!id) return '#5e5e5e';
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) {
+    hash = id.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  return colorPalette[Math.abs(hash) % colorPalette.length];
+}
+
 export const IngredientEdge: FC<EdgeProps<Edge<IIngredientEdgeData>>> = ({
   id,
   sourceX,
@@ -47,14 +62,17 @@ export const IngredientEdge: FC<EdgeProps<Edge<IIngredientEdgeData>>> = ({
   const sourceNode = useInternalNode(source);
   const targetNode = useInternalNode(target);
 
-  const isBiDirectionEdge = useStore(s => {
-    const edgeExists = s.edges.some(
-      e =>
-        (e.source === target && e.target === source) ||
-        (e.target === source && e.source === target),
-    );
-    return edgeExists;
+  const isBiDirectionEdge = data?.isBiDirectionEdge || false;
+
+  // Per-edge selectors: only this edge re-renders when ITS nodes change selection.
+  // Zustand skips re-renders when the returned boolean is unchanged.
+  const isHighlighted = useStore(s => {
+    const src = s.nodeLookup.get(source);
+    const tgt = s.nodeLookup.get(target);
+    return !!(src?.selected || tgt?.selected);
   });
+  // anySelected is handled via CSS variable set imperatively by SolverLayout
+  // so this component never re-renders just because something else was clicked.
 
   const maxBelt = useGameSettingMaxBelt();
   const maxPipeline = useGameSettingMaxPipeline();
@@ -119,20 +137,29 @@ export const IngredientEdge: FC<EdgeProps<Edge<IIngredientEdgeData>>> = ({
         path={edgePath}
         {...edgeProps}
         style={{
-          stroke:
-            sx < tx ? 'url(#edge-gradient)' : 'url(#edge-gradient-reverse)',
+          stroke: getResourceColor(data?.resource?.id),
+          strokeWidth: isHighlighted ? 4 : 1.5,
+          opacity: isHighlighted ? 1 : 'var(--edge-dim-opacity, 1)' as any,
+          filter: isHighlighted ? `drop-shadow(0 0 5px ${getResourceColor(data?.resource?.id)})` : undefined,
+          transition: 'opacity 0.15s ease, stroke-width 0.15s ease, filter 0.15s ease',
         }}
       />
-      <circle r="2" fill="var(--mantine-color-indigo-3)">
-        <animateMotion
-          dur={`${duration}s`}
-          repeatCount="indefinite"
-          path={edgePath}
-        />
-      </circle>
+      {isHighlighted && (
+        <circle 
+          r="3" 
+          fill="var(--mantine-color-indigo-3)"
+        >
+          <animateMotion
+            dur={`${duration}s`}
+            repeatCount="indefinite"
+            path={edgePath}
+          />
+        </circle>
+      )}
       <EdgeLabelRenderer>
         <Box
           p={'4px'}
+          className="nodrag"
           style={{
             pointerEvents: 'all',
             borderRadius: 4,
@@ -142,8 +169,9 @@ export const IngredientEdge: FC<EdgeProps<Edge<IIngredientEdgeData>>> = ({
             ),
             position: 'absolute',
             transform: `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`,
+          opacity: isHighlighted ? 1 : 'var(--edge-dim-opacity, 1)' as any,
+            transition: 'opacity 0.15s ease',
           }}
-          className="nodrag"
         >
           <Tooltip
             color="dark.8"

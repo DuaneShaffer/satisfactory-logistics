@@ -109,6 +109,7 @@ export function solveProduction(
   const nodes: SolutionNode[] = [];
   const edges: Edge[] = []; // TODO Type this like SolutionNode
 
+
   if (result.Status === 'Optimal') {
     for (const [varName, value] of Object.entries(result.Columns)) {
       if (Math.abs(value.Primal) < Number.EPSILON) continue;
@@ -147,21 +148,19 @@ export function solveProduction(
 
         if (node.type === 'raw' || node.type === 'raw_input') {
           nodes.push({
-            id: varName,
+            id: varName, // Critical: this must match the edge 'source'
             type: 'Resource',
+            hidden: true,
             data: {
               label: `${node.resource.name}`,
               value: Number(value.Primal),
               resource: node.resource,
-              isRaw: node.type === 'raw',
-              input: node.type === 'raw_input' ? node.input : undefined,
-              inputIndex:
-                node.type === 'raw_input' ? node.inputIndex : undefined,
+              isRaw: true,
               state: request.nodes?.[varName],
             } as IResourceNodeData,
             position: { x: 0, y: 0 },
           });
-          continue;
+          continue; // Skip the rest of the node processing, but the node IS in the array
         }
 
         if (node.type === 'byproduct') {
@@ -222,6 +221,12 @@ export function solveProduction(
           continue;
         }
 
+        const sourceVarName = ctx.graph.source(varName);
+
+        // Skip edges whose source is a hidden raw_input node — those inputs are
+        // not rendered as visible nodes so there's nothing to draw an edge from.
+        if (sourceNode.type === 'raw' || sourceNode.type === 'raw_input') continue;
+
         // const machineNode = ctx.graph.getNodeAttributes(targetNode.recipeMainProductVariable);
         edges.push({
           id: varName,
@@ -247,6 +252,5 @@ export function solveProduction(
       }
     }
   }
-
   return { result, nodes, edges, graph: ctx.graph, context: ctx };
 }

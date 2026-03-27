@@ -6,9 +6,13 @@ import { IngredientEdge } from '@/solver/edges/IngredientEdge';
 import type { SolverLayoutState, SolverNodeState } from '@/solver/store/Solver';
 import { usePathSolverLayout } from '@/solver/store/solverSelectors';
 import { toggleFullscreen } from '@/utils/toggleFullscreen.tsx';
-import dagre from '@dagrejs/dagre';
-import { Box } from '@mantine/core';
+import ELK from 'elkjs/lib/elk.bundled.js';
+import { useSolverSolution } from '@/solver/layout/solution-context/SolverSolutionContext';
+import { LoadingOverlay, Stack, Text, Loader, Box } from '@mantine/core';
 import { IconArrowsMaximize, IconMaximizeOff } from '@tabler/icons-react';
+import type { SolverEnergyNode, SolverAreaNode } from '@/solver/algorithm/SolverNode';
+import { RepeatingNumber } from '@/core/intl/NumberFormatter';
+import type { IMachineNodeData } from '@/solver/layout/nodes/machine-node/MachineNode';
 import {
   Background,
   BackgroundVariant,
@@ -26,11 +30,12 @@ import {
   useNodesState,
   useReactFlow,
   type OnNodesChange,
+  type OnSelectionChangeFunc,
   type XYPosition,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { isEqual } from 'lodash';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { ByproductNode } from './nodes/byproduct-node/ByproductNode';
 import { MachineNode } from './nodes/machine-node/MachineNode';
@@ -45,56 +50,15 @@ import {
 import { updateNodesWithLayoutState } from './state/updateNodesWithLayoutState';
 import { usePreviousSolverLayoutStates } from './state/usePreviousSolverLayoutStates';
 
-// const dagreGraph = new dagre.graphlib.Graph();
-// dagreGraph.setDefaultEdgeLabel(() => ({}));
-
+const elk = new ELK();
 const logger = log.getLogger('solver:layout');
 logger.setLevel('info');
 
 const snapValueToGrid = (value: number) => Math.round(value / 10) * 10;
 const snapSizeToGrid = (value: number) => Math.round(value / 20) * 20;
 
-const GraphLayoutOptions = {
-  rankdir: 'LR',
-  align: undefined,
-  nodesep: 50,
-  edgesep: 10,
-  ranksep: 130,
-  ranker: 'network-simplex',
-};
-
-// const graphControls = useControls({
-//   rankdir: {
-//     value: 'LR',
-//     options: ['LR', 'TB'],
-//   },
-//   align: {
-//     value: undefined,
-//     options: [undefined, 'DL', 'UL', 'DR', 'UR'],
-//   },
-//   nodesep: {
-//     value: 50,
-//     min: 10,
-//     max: 200,
-//   },
-//   edgesep: {
-//     value: 10,
-//     min: 2,
-//     max: 100,
-//   },
-//   ranksep: {
-//     value: 130,
-//     min: 10,
-//     max: 200,
-//   },
-//   ranker: {
-//     value: 'network-simplex',
-//     options: ['network-simplex', 'tight-tree', 'longest-path'],
-//   },
-// });
-
 function getNodeComputedPosition(
-  dagreNode: dagre.Node,
+  layoutNode: { x?: number; y?: number },
   node: SolutionNode,
   nodeSavedPosition: XYPosition | undefined,
 ): XYPosition {
@@ -105,11 +69,10 @@ function getNodeComputedPosition(
     };
   }
 
-  // We are shifting the dagre node position (anchor=center center) to the top left
-  // so it matches the React Flow node anchor point (top left).
+  // ELK node coordinates are top-left by default, matching React Flow perfectly!
   return {
-    x: snapValueToGrid(dagreNode.x - (node.measured?.width ?? 0) / 2),
-    y: snapValueToGrid(dagreNode.y - (node.measured?.height ?? 0) / 2),
+    x: snapValueToGrid(layoutNode.x ?? 0),
+    y: snapValueToGrid(layoutNode.y ?? 0),
   };
 }
 
@@ -117,28 +80,14 @@ function getNodeComputedPosition(
  * @prop activeLayout - The layout state to use. If null, the layout will be computed. Could be
  *  used to restore a previous layout.
  */
-const getLayoutedElements = (
+const getLayoutedElements = async (
   nodes: SolutionNode[],
   edges: Edge[],
   activeLayout: SolverLayoutState | null | undefined,
-  // graphOptions: dagre.configUnion,
 ) => {
   const useSavedLayout = activeLayout != null;
   logger.debug(`getLayouted: useSavedLayout=${useSavedLayout}`);
 
-  const dagreGraph = new dagre.graphlib.Graph();
-  dagreGraph.setDefaultEdgeLabel(() => ({}));
-
-  const isHorizontal = GraphLayoutOptions.rankdir === 'LR';
-  dagreGraph.setGraph(GraphLayoutOptions);
-
-  logger.debug(`getLayouted: nodes[0] width: ${nodes[0].measured?.width ?? '<null>'}, height: ${nodes[0].measured?.height ?? '<null>'}`); // prettier-ignore
-  (nodes as (InternalNode | Node)[]).forEach(node => {
-    dagreGraph.setNode(node.id, {
-      width: snapSizeToGrid(node.measured?.width ?? 0),
-      height: snapSizeToGrid(node.measured?.height ?? 0),
-    });
-  });
   const filteredEdges = edges.filter(
     edge =>
       !(
@@ -149,35 +98,63 @@ const getLayoutedElements = (
       ),
   );
 
-  filteredEdges.forEach(edge => {
-    dagreGraph.setEdge(edge.source, edge.target);
-  });
+  let elkGraph: any = null;
 
-  // We want to perform layout only if the saved layout is not valid
   if (!useSavedLayout) {
-    dagre.layout(dagreGraph, GraphLayoutOptions);
+    const graphLayer = {
+      id: 'root',
+      layoutOptions: {
+        'elk.algorithm': 'layered',
+        'elk.direction': 'RIGHT',
+        'elk.spacing.nodeNode': '100',
+        'elk.layered.spacing.nodeNodeBetweenLayers': '300',
+        'elk.layered.spacing.edgeNodeBetweenLayers': '80',
+        'elk.layered.spacing.edgeEdgeBetweenLayers': '20',
+        'elk.layered.crossingMinimization.strategy': 'LAYER_SWEEP',
+        'elk.layered.nodePlacement.strategy': 'BRANDES_KOEPF',
+      },
+      children: nodes.map(node => ({
+        id: node.id,
+        width: snapSizeToGrid(node.measured?.width ?? 0),
+        height: snapSizeToGrid(node.measured?.height ?? 0),
+      })),
+      edges: filteredEdges.map(edge => ({
+        id: edge.id,
+        sources: [edge.source],
+        targets: [edge.target],
+      })),
+    };
+
+    elkGraph = await elk.layout(graphLayer);
   }
+
+  const isHorizontal = true; // Hardcoded LR layout
 
   const newNodes: SolutionNode[] = (nodes as InternalNode<SolutionNode>[]).map(
     node => {
-      // Position is calculated based on the dagre node position or, if available,
-      // the saved position.
+      let layoutX = 0;
+      let layoutY = 0;
+
+      if (!useSavedLayout && elkGraph?.children) {
+        const elkNode = elkGraph.children.find((n: any) => n.id === node.id);
+        layoutX = elkNode?.x ?? 0;
+        layoutY = elkNode?.y ?? 0;
+      }
+
       const nodePosition = getNodeComputedPosition(
-        dagreGraph.node(node.id),
+        { x: layoutX, y: layoutY },
         node,
-        // We _could_ use the save layout always, but we want to restore to
-        // computed layout if atleast one node changes.
         useSavedLayout ? activeLayout[node.id] : undefined,
       );
 
-      const newNode = {
+      const newNode: any = {
         ...node,
         targetPosition: isHorizontal ? Position.Left : Position.Top,
         sourcePosition: isHorizontal ? Position.Right : Position.Bottom,
 
         position: nodePosition,
       };
-
+      
       return newNode as unknown as SolutionNode;
     },
   );
@@ -209,12 +186,44 @@ export const SolverLayout = (props: SolverLayoutProps) => {
 
   const [nodes, setNodes, onNodesChange] = useNodesState(props.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(props.edges);
-  const [opacity, setOpacity] = useState(0);
+  const [isLayouting, setIsLayouting] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  // Set CSS variable imperatively on the container — zero React re-renders for edge dimming
+  const onSelectionChange: OnSelectionChangeFunc = useCallback(({ nodes: selNodes }) => {
+    if (ref.current) {
+      ref.current.style.setProperty(
+        '--edge-dim-opacity',
+        selNodes.length > 0 ? '0.12' : '1',
+      );
+    }
+  }, [ref]);
 
   const nodesInitialized = useNodesInitialized();
   const [initialLayoutFinished, setInitialLayoutFinished] = useState(false);
   const [initialFitViewFinished, setInitialFitViewFinished] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // Stats for loading overlay
+  const solutionContext = useSolverSolution();
+  const solution = solutionContext?.solution;
+
+  const stats = useMemo(() => {
+    if (!solution) return { power: 0, area: 0 };
+    const machineNodes = solution.nodes.filter(
+      (node): node is Node<IMachineNodeData, 'Machine'> =>
+        node.type === 'Machine',
+    );
+    const power = machineNodes.reduce((acc, node) => {
+      const energyNode = solution.graph.getNodeAttributes(`e${node.data.recipe.index}`) as SolverEnergyNode;
+      return acc + (energyNode.value ?? 0);
+    }, 0);
+    const area = machineNodes.reduce((acc, node) => {
+      const areaNode = solution.graph.getNodeAttributes(`area${node.data.recipe.index}`) as SolverAreaNode;
+      return acc + (areaNode.value ?? 0);
+    }, 0);
+    return { power, area };
+  }, [solution]);
 
   const handleToggleFullscreen = () => {
     toggleFullscreen(ref);
@@ -236,10 +245,6 @@ export const SolverLayout = (props: SolverLayoutProps) => {
   // When nodes change, we need to re-layout them.
   useEffect(() => {
     logger.debug('Initializing nodes...');
-
-    if (!isSavedLayoutValid(props.nodes, savedLayout)) {
-      setOpacity(0);
-    }
 
     // Force re-fit view if nodes change
     // TODO better to do a xor-ing of nodes
@@ -264,24 +269,20 @@ export const SolverLayout = (props: SolverLayoutProps) => {
   useEffect(() => {
     // We can't trust `nodesInitialized` to be true, because it's updated later in the loop.
     // We need to check if the nodes have real measurements.
+    const visibleNodes = nodes.filter(n => !n.hidden);
     const isMeasured =
       nodesInitialized &&
-      nodes[0]?.measured?.width &&
-      nodes[0]?.measured?.height;
+      (visibleNodes.length === 0 || (visibleNodes[0]?.measured?.width && visibleNodes[0]?.measured?.height));
 
     // logger.debug(`Check for re-layout: nodesInitialized=${nodesInitialized}, initialLayoutFinished=${initialLayoutFinished} hasRealMeasurements=${isMeasured}`); // prettier-ignore
 
     const shouldRelayout =
       isMeasured && (!initialLayoutFinished || savedLayout == null);
 
-    // 1. Nodes are initialized, so we can layout them. or
-    // 1B. Nodes are initialized, but the layout has been reset.
-    if (shouldRelayout) {
+    if (shouldRelayout && !isLayouting) {
       logger.info(`-> Layouting (initial layout in progress)`); // prettier-ignore
+      setIsLayouting(true);
 
-      // Find the layout to use. If the saved layout is not valid, we use the
-      // previous layout that is compatible with the current nodes.
-      // If no previous layout is compatible, we use the computed layout.
       const activeLayout =
         savedLayout == null
           ? null
@@ -289,40 +290,41 @@ export const SolverLayout = (props: SolverLayoutProps) => {
             ? savedLayout
             : getCompatiblePreviousLayout(nodes);
 
-      const layouted = getLayoutedElements(
+      getLayoutedElements(
         getNodes(),
         getEdges(),
         activeLayout,
-      );
+      ).then(layouted => {
+        setNodes([...layouted.nodes]);
+        setEdges([...layouted.edges]);
+        setInitialLayoutFinished(true);
+        setIsLayouting(false);
 
-      setNodes([...layouted.nodes]);
-      setEdges([...layouted.edges]);
-      setInitialLayoutFinished(true);
+        // Re-fit view if the layout has been reset
+        if (savedLayout == null) {
+          setInitialFitViewFinished(false);
+        }
 
-      // Re-fit view if the layout has been reset
-      if (savedLayout == null) {
-        setInitialFitViewFinished(false);
-      }
-
-      const computedLayout = computeSolverLayout(layouted.nodes);
-      if (!areSolverLayoutsEqual(savedLayout, computedLayout)) {
-        logger.debug('-> Updating saved layout');
-        useStore.getState().setSolverLayout(solverId!, computedLayout);
-      }
+        const computedLayout = computeSolverLayout(layouted.nodes);
+        if (!areSolverLayoutsEqual(savedLayout, computedLayout)) {
+          logger.debug('-> Updating saved layout');
+          useStore.getState().setSolverLayout(solverId!, computedLayout);
+        }
+      }).catch(err => {
+        logger.error('Layout mapping failed', err);
+        setIsLayouting(false);
+      });
     }
 
     // 2. Nodes are initialized and layouted, so we can fit the view.
-    if (isMeasured && initialLayoutFinished && !initialFitViewFinished) {
+    if (isMeasured && initialLayoutFinished && !initialFitViewFinished && !isLayouting) {
       logger.debug('-> Fitting view...');
       setInitialFitViewFinished(true);
       if (nodes.length > 0 && !previousFittedWithNodes.current) {
         previousFittedWithNodes.current = true;
         fitView().then(() => {
-          setOpacity(1);
           logger.debug('-> Fitting view completed');
         });
-      } else {
-        setOpacity(1);
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -332,9 +334,8 @@ export const SolverLayout = (props: SolverLayoutProps) => {
     initialLayoutFinished,
     initialFitViewFinished,
     getCompatiblePreviousLayout,
+    isLayouting
   ]);
-
-  const ref = useRef<HTMLDivElement>(null);
 
   /**
    * On nodes change, we need to update the layout state and
@@ -345,6 +346,12 @@ export const SolverLayout = (props: SolverLayoutProps) => {
   const handleNodesChange: OnNodesChange<SolutionNode> = useCallback(
     changes => {
       onNodesChange(changes);
+
+      // Only persist layout when a drag ends (not during every mouse-move)
+      const hasDragStop = changes.some(
+        c => c.type === 'position' && !c.dragging
+      );
+      if (!hasDragStop) return;
 
       const updatedLayout = computeSolverLayout(getNodes());
 
@@ -382,8 +389,28 @@ export const SolverLayout = (props: SolverLayoutProps) => {
   //   [setMenu],
   // );
 
+  const loaderData = (
+    <Stack align="center" gap="sm">
+      <Loader size="lg" />
+      <Text size="lg" fw={500}>Calculating Optimal Layout...</Text>
+      {solution && (
+        <Text size="sm" c="dimmed" ta="center">
+          Placing {props.nodes.length} nodes and routing {props.edges.length} connections
+          <br/>
+          Power: <RepeatingNumber value={stats.power} /> MW | Area: <RepeatingNumber value={stats.area} /> m²
+        </Text>
+      )}
+    </Stack>
+  );
+
   return (
-    <Box w={'100%'} h={'80vh'} opacity={opacity}>
+    <Box w={'100%'} h={'80vh'} pos="relative">
+      <LoadingOverlay
+         visible={isLayouting || !initialFitViewFinished}
+         zIndex={100}
+         overlayProps={{ radius: 'sm', blur: 3, backgroundOpacity: 0.8, color: 'var(--mantine-color-body)' }}
+         loaderProps={{ children: loaderData }}
+      />
       <ReactFlow
         ref={ref}
         minZoom={0.2}
@@ -393,6 +420,7 @@ export const SolverLayout = (props: SolverLayoutProps) => {
         edgeTypes={edgeTypes}
         onNodesChange={handleNodesChange}
         onEdgesChange={onEdgesChange}
+        onSelectionChange={onSelectionChange}
         connectionLineType={ConnectionLineType.SmoothStep}
         selectNodesOnDrag={false}
         // onNodeContextMenu={onNodeContextMenu}
